@@ -448,15 +448,25 @@ class OVExportCommand(BaseOptimumCLICommand):
             if getattr(config, "model_type", "") in MULTI_MODAL_TEXT_GENERATION_MODELS:
                 task = "image-text-to-text"
 
-        if library_name == "diffusers" and quantize_with_dataset:
+        use_diffusers_pipeline = library_name == "diffusers" and quantize_with_dataset
+        if use_diffusers_pipeline:
             if not is_diffusers_available():
                 raise ValueError(DIFFUSERS_IMPORT_ERROR.format("Export of diffusers models"))
 
             from diffusers import DiffusionPipeline
 
-            diffusers_config = DiffusionPipeline.load_config(self.args.model)
-            class_name = diffusers_config.get("_class_name", None)
+            try:
+                diffusers_config = DiffusionPipeline.load_config(self.args.model)
+            except EnvironmentError:
+                logger.info(
+                    "Falling back to the transformers path for task 'image-to-image' because the checkpoint does not "
+                    "expose a diffusers `model_index.json`."
+                )
+                use_diffusers_pipeline = False
+            else:
+                class_name = diffusers_config.get("_class_name", None)
 
+        if use_diffusers_pipeline:
             if class_name == "LatentConsistencyModelPipeline":
                 from optimum.intel import OVLatentConsistencyModelPipeline
 
@@ -497,11 +507,13 @@ class OVExportCommand(BaseOptimumCLICommand):
         elif (
             quantize_with_dataset
             and (
-                task in ["fill-mask", "zero-shot-image-classification"]
+                task in ["fill-mask", "zero-shot-image-classification", "object-detection"]
                 or task.startswith("text-generation")
                 or task.startswith("text2text-generation")
                 or task.startswith("automatic-speech-recognition")
                 or task.startswith("feature-extraction")
+                or task == "image-classification"
+                or task == "image-to-image"
             )
             or (task == "image-text-to-text" and quantization_config is not None)
         ):
@@ -529,6 +541,23 @@ class OVExportCommand(BaseOptimumCLICommand):
                 from ...intel import OVSentenceTransformer
 
                 model_cls = OVSentenceTransformer
+            elif task == "image-classification":
+                from ...intel import OVModelForImageClassification
+
+                model_cls = OVModelForImageClassification
+            elif task == "image-to-image":
+                if use_diffusers_pipeline:
+                    from ...intel import OVPipelineForImage2Image
+
+                    model_cls = OVPipelineForImage2Image
+                else:
+                    from ...intel import OVModelForCustomTasks
+
+                    model_cls = OVModelForCustomTasks
+            elif task == "object-detection":
+                from ...intel import OVModelForCustomTasks
+
+                model_cls = OVModelForCustomTasks
             elif task == "fill-mask":
                 from ...intel import OVModelForMaskedLM
 
@@ -551,6 +580,7 @@ class OVExportCommand(BaseOptimumCLICommand):
                 trust_remote_code=self.args.trust_remote_code,
                 variant=self.args.variant,
                 cache_dir=self.args.cache_dir,
+                task=task,
             )
             model.save_pretrained(self.args.output)
 

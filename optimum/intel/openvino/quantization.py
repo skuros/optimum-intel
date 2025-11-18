@@ -36,7 +36,18 @@ from openvino._offline_transformations import compress_quantize_weights_transfor
 from PIL import Image
 from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
-from transformers import AutoProcessor, AutoTokenizer, DataCollator, default_data_collator
+from transformers import AutoFeatureExtractor, AutoProcessor, AutoTokenizer, DataCollator, default_data_collator
+from transformers.feature_extraction_utils import FeatureExtractionMixin
+
+try:
+    from transformers import AutoImageProcessor
+except ImportError:  # pragma: no cover - fallback for older Transformers
+    AutoImageProcessor = None
+
+try:
+    from transformers.image_processing_utils import ImageProcessingMixin
+except ImportError:  # pragma: no cover - fallback for older Transformers
+    ImageProcessingMixin = None
 from transformers.pytorch_utils import Conv1D
 from transformers.utils import is_accelerate_available
 
@@ -60,14 +71,23 @@ from .configuration import (
     OVQuantizationMethod,
     OVWeightQuantizationConfig,
 )
-from .modeling import OVModel, OVModelForFeatureExtraction, OVModelForMaskedLM, OVModelForZeroShotImageClassification
+from .modeling import (
+    OVModel,
+    OVModelForCustomTasks,
+    OVModelForFeatureExtraction,
+    OVModelForImageClassification,
+    OVModelForMaskedLM,
+    OVModelForZeroShotImageClassification,
+)
 from .modeling_base import OVBaseModel
 from .modeling_decoder import OVBaseDecoderModel, OVModelForCausalLM
 from .modeling_sam import OVSamModel
 from .modeling_seq2seq import OVModelForSeq2SeqLM, _OVModelForWhisper
 from .modeling_visual_language import OVModelForVisualCausalLM, OVVisionEmbedding
 from .utils import (
+    PREDEFINED_IMAGE_CLASSIFICATION_DATASETS,
     PREDEFINED_LANGUAGE_DATASETS,
+    PREDEFINED_OBJECT_DETECTION_DATASETS,
     PREDEFINED_SAM_DATASETS,
     PREDEFINED_SD_DATASETS,
     PREDEFINED_SPEECH_TO_TEXT_DATASETS,
@@ -322,6 +342,45 @@ class OVCalibrationDatasetBuilder:
                 )
             else:
                 raise Exception
+        elif isinstance(self.model, OVModelForImageClassification):
+            if config.dataset is None:
+                raise ValueError("Please provide a dataset for calibration.")
+
+            if config.dataset not in PREDEFINED_IMAGE_CLASSIFICATION_DATASETS:
+                raise ValueError(
+                    "Unsupported dataset label for image classification. Supported values are: "
+                    f"{set(PREDEFINED_IMAGE_CLASSIFICATION_DATASETS.keys())}."
+                )
+
+            dataset_metadata = PREDEFINED_IMAGE_CLASSIFICATION_DATASETS[config.dataset]
+            return self.build_from_dataset_name(
+                config,
+                dataset_metadata["id"],
+                num_samples=config.num_samples,
+                dataset_split=dataset_metadata["split"],
+                streaming=dataset_metadata["streaming"],
+            )
+        elif isinstance(self.model, OVModelForCustomTasks):
+            if config.num_samples is None:
+                config.num_samples = 32
+                warn_once(
+                    logger,
+                    "Calibration sample count not provided; defaulting to 32 samples for custom image tasks to limit memory usage."
+                )
+            if config.dataset not in PREDEFINED_OBJECT_DETECTION_DATASETS:
+                raise ValueError(
+                    "Unsupported dataset label for object detection. Supported values are: "
+                    f"{set(PREDEFINED_OBJECT_DETECTION_DATASETS.keys())}."
+                )
+
+            dataset_metadata = PREDEFINED_OBJECT_DETECTION_DATASETS[config.dataset]
+            return self.build_from_dataset_name(
+                config,
+                dataset_metadata["id"],
+                num_samples=config.num_samples,
+                dataset_split=dataset_metadata["split"],
+                streaming=dataset_metadata["streaming"],
+            )
         elif is_diffusers_available() and isinstance(self.model, OVDiffusionPipeline):
             if isinstance(config.dataset, str):
                 dataset_name = config.dataset
@@ -481,6 +540,8 @@ class OVCalibrationDatasetBuilder:
                 (
                     OVModelForVisualCausalLM,
                     _OVModelForWhisper,
+                    OVModelForImageClassification,
+                    OVModelForCustomTasks,
                     OVModelForFeatureExtraction,
                     OVModelForMaskedLM,
                     OVModelForZeroShotImageClassification,
@@ -505,6 +566,10 @@ class OVCalibrationDatasetBuilder:
                 return self._prepare_speech_to_text_calibration_data(quantization_config, dataset)
             elif isinstance(self.model, OVModelForSeq2SeqLM):
                 return self._prepare_text_to_text_calibration_data(quantization_config, dataset)
+            elif isinstance(self.model, OVModelForImageClassification):
+                return self._prepare_image_classification_calibration_data(quantization_config, dataset)
+            elif isinstance(self.model, OVModelForCustomTasks):
+                return self._prepare_object_detection_calibration_data(quantization_config, dataset)
             elif is_diffusers_available() and isinstance(self.model, OVDiffusionPipeline):
                 return self._prepare_diffusion_calibration_data(quantization_config, dataset)
             elif (
@@ -874,6 +939,217 @@ class OVCalibrationDatasetBuilder:
             collected_inputs[model_name] = nncf.Dataset(collected_inputs[model_name])
 
         return OVCalibrationDataset(collected_inputs)
+
+    def _prepare_image_classification_calibration_data(
+        self,
+        config: OVQuantizationConfigBase,
+        dataset: "Dataset",
+    ) -> OVCalibrationDataset:
+        image_processor = self._get_image_processor(config)
+
+        self.model.compile()
+        collected_inputs: List[Dict[str, Any]] = []
+        inference_result_mock = {"logits": np.empty((1,), np.float32)}
+        self.model.request = InferRequestWrapper(
+            self.model.request,
+            collected_inputs,
+            inference_result_mock=inference_result_mock,
+        )
+
+        num_samples = config.num_samples
+        try:
+            iterator = dataset.take(num_samples) if hasattr(dataset, "take") else islice(dataset, num_samples)
+            pbar = tqdm(total=num_samples, desc="Collecting calibration data")
+
+            for item in iterator:
+                pixel_values = self._extract_pixel_values(item, image_processor)
+                if pixel_values is None:
+                    continue
+
+                prev_len = len(collected_inputs)
+                self.model(pixel_values=pixel_values)
+                added = len(collected_inputs) - prev_len
+                if added > 0:
+                    pbar.update(min(added, num_samples - pbar.n))
+
+                if len(collected_inputs) >= num_samples:
+                    break
+
+            pbar.close()
+        finally:
+            self.model.request = self.model.request.request
+
+        if not collected_inputs:
+            raise ValueError("No valid samples were collected for calibration. Please check the dataset inputs.")
+
+        return OVCalibrationDataset({"model": nncf.Dataset(collected_inputs[: num_samples])})
+
+    def _prepare_object_detection_calibration_data(
+        self,
+        config: OVQuantizationConfigBase,
+        dataset: "Dataset",
+    ) -> OVCalibrationDataset:
+        image_processor = self._get_image_processor(config)
+
+        self.model.compile()
+        collected_inputs: List[Dict[str, Any]] = []
+        self.model.request = InferRequestWrapper(
+            self.model.request,
+            collected_inputs,
+            inference_result_mock={},
+        )
+
+        num_samples = config.num_samples or 128
+        try:
+            iterator = dataset.take(num_samples) if hasattr(dataset, "take") else islice(dataset, num_samples)
+            pbar = tqdm(total=num_samples, desc="Collecting calibration data")
+
+            for item in iterator:
+                inputs = self._extract_object_detection_inputs(item, image_processor)
+                if inputs is None:
+                    continue
+
+                prev_len = len(collected_inputs)
+                self.model(**inputs)
+                added = len(collected_inputs) - prev_len
+                if added > 0:
+                    pbar.update(min(added, num_samples - pbar.n))
+
+                if len(collected_inputs) >= num_samples:
+                    break
+
+            pbar.close()
+        finally:
+            self.model.request = self.model.request.request
+
+        if not collected_inputs:
+            raise ValueError("No valid samples were collected for calibration. Please check the dataset inputs.")
+
+        return OVCalibrationDataset({"model": nncf.Dataset(collected_inputs[: num_samples])})
+
+    def _extract_pixel_values(self, sample: Dict[str, Any], image_processor) -> Optional[torch.Tensor]:
+        pixel_values = sample.get("pixel_values")
+        if pixel_values is not None:
+            tensor = self._ensure_tensor(pixel_values)
+            if tensor is not None:
+                return tensor
+
+        image = self._load_image_from_sample(sample)
+        if image is None:
+            return None
+
+        processed = image_processor(images=image, return_tensors="pt")
+        return processed["pixel_values"]
+
+    def _extract_object_detection_inputs(
+        self,
+        sample: Dict[str, Any],
+        image_processor,
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        inputs: Dict[str, torch.Tensor] = {}
+
+        pixel_values = sample.get("pixel_values")
+        if pixel_values is not None:
+            tensor = self._ensure_tensor(pixel_values)
+            if tensor is None:
+                return None
+            inputs["pixel_values"] = tensor
+            pixel_mask = sample.get("pixel_mask")
+            if pixel_mask is not None:
+                mask_tensor = self._ensure_tensor(pixel_mask)
+                if mask_tensor is not None:
+                    inputs["pixel_mask"] = mask_tensor
+            return inputs
+
+        image = self._load_image_from_sample(sample)
+        if image is None:
+            return None
+
+        processed = image_processor(images=image, return_tensors="pt")
+        for name, value in processed.items():
+            inputs[name] = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+
+        return inputs if inputs else None
+
+    def _load_image_from_sample(self, sample: Dict[str, Any]) -> Optional[Image.Image]:
+        image = sample.get("image")
+        if isinstance(image, Image.Image):
+            return image.convert("RGB")
+        if isinstance(image, np.ndarray):
+            return Image.fromarray(image.astype(np.uint8)).convert("RGB")
+
+        image_url = sample.get("image_url")
+        if isinstance(image_url, str):
+            try:
+                response = requests.get(image_url, timeout=5)
+                response.raise_for_status()
+                return Image.open(BytesIO(response.content)).convert("RGB")
+            except Exception:
+                return None
+
+        image_path = sample.get("image_path")
+        if isinstance(image_path, str):
+            try:
+                with open(image_path, "rb") as fp:
+                    return Image.open(fp).convert("RGB")
+            except Exception:
+                return None
+
+        return None
+
+    def _ensure_tensor(self, value: Any) -> Optional[torch.Tensor]:
+        if isinstance(value, torch.Tensor):
+            return value
+        if isinstance(value, np.ndarray):
+            return torch.from_numpy(value)
+        if isinstance(value, (list, tuple)):
+            return torch.tensor(value)
+        return None
+
+    def _get_image_processor(self, config: OVQuantizationConfigBase):
+        processor_mixins: Tuple[type, ...] = (FeatureExtractionMixin,)
+        if ImageProcessingMixin is not None:
+            processor_mixins = processor_mixins + (ImageProcessingMixin,)
+
+        for preprocessor in getattr(self.model, "preprocessors", []):
+            if isinstance(preprocessor, processor_mixins):
+                return preprocessor
+
+        candidates: List[str] = []
+        if config.processor is not None:
+            candidates.append(config.processor)
+
+        name_or_path = getattr(self.model.config, "_name_or_path", None)
+        if name_or_path:
+            candidates.append(name_or_path)
+
+        config_name_or_path = getattr(self.model.config, "name_or_path", None)
+        if config_name_or_path:
+            candidates.append(config_name_or_path)
+
+        model_name = getattr(self.model, "name_or_path", None)
+        if model_name:
+            candidates.append(model_name)
+
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen or candidate is None:
+                continue
+            seen.add(candidate)
+
+            if AutoImageProcessor is not None:
+                try:
+                    return AutoImageProcessor.from_pretrained(candidate, trust_remote_code=config.trust_remote_code)
+                except Exception:
+                    pass
+            try:
+                return AutoFeatureExtractor.from_pretrained(candidate, trust_remote_code=config.trust_remote_code)
+            except Exception:
+                continue
+
+        raise ValueError(
+            "Unable to resolve an image processor for calibration. Please provide it via quantization_config.processor."
+        )
 
     def _prepare_diffusion_calibration_data(
         self, config: OVQuantizationConfigBase, dataset: Union[List, "Dataset"]

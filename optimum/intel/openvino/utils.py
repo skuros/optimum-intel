@@ -177,6 +177,24 @@ PREDEFINED_TEXT_IMAGE_ENCODER_DATASETS = {
     },
 }
 
+PREDEFINED_IMAGE_CLASSIFICATION_DATASETS = {
+    "conceptual_captions": {
+        "id": "conceptual_captions",
+        "split": "train",
+        "image_column_name": "image_url",
+        "streaming": True,
+    }
+}
+
+PREDEFINED_OBJECT_DETECTION_DATASETS = {
+    "conceptual_captions": {
+        "id": "conceptual_captions",
+        "split": "train",
+        "image_column_name": "image_url",
+        "streaming": True,
+    }
+}
+
 PREDEFINED_VISUAL_LM_DATASETS = {
     "contextual": {
         "id": "ucla-contextual/contextual_test",
