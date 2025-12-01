@@ -16,6 +16,7 @@
 import unittest
 from pathlib import Path
 
+from optimum.intel.openvino.modeling_sam import OVSam2Model, OVSam2VideoModel
 import torch
 from parameterized import parameterized
 from sentence_transformers import SentenceTransformer, models
@@ -78,6 +79,8 @@ class ExportModelTest(unittest.TestCase):
         "latent-consistency": OVLatentConsistencyModelPipeline,
         "llava": OVModelForVisualCausalLM,
         "sam": OVSamModel,
+        "sam2": OVSam2Model,
+        "sam-video": OVSam2VideoModel,
         "speecht5": OVModelForTextToSpeechSeq2Seq,
         "clip": OVModelForZeroShotImageClassification,
         "mamba": OVModelForCausalLM,

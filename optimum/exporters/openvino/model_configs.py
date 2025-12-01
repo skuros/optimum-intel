@@ -132,6 +132,7 @@ from .model_patcher import (
     Phi4MMLanguageModelPatcher,
     Phi4MMVisionEmbeddingsPatcher,
     PhiMoEModelPatcher,
+    Sam2VideoModelPatcher,
     Qwen2_5_VLVisionEmbMergerPatcher,
     Qwen2MoEPatcher,
     Qwen2VLLanguageModelPatcher,
@@ -206,9 +207,10 @@ def init_model_configs():
     if is_diffusers_available() and "fill" not in TasksManager._DIFFUSERS_TASKS_TO_MODEL_LOADERS:
         TasksManager._DIFFUSERS_TASKS_TO_MODEL_LOADERS["fill"] = "FluxFillPipeline"
         TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS["fill"] = {"flux": "FluxFillPipeline"}
-        TasksManager._DIFFUSERS_TASKS_TO_MODEL_LOADERS["text-to-image"] = ("AutoPipelineForText2Image", "SanaPipeline")
-        TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS["text-to-image"]["sana"] = "SanaPipeline"
-        TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS["text-to-image"]["sana-sprint"] = "SanaSprintPipeline"
+        if "text-to-image" in TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS:
+            TasksManager._DIFFUSERS_TASKS_TO_MODEL_LOADERS["text-to-image"] = ("AutoPipelineForText2Image", "SanaPipeline")
+            TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS["text-to-image"]["sana"] = "SanaPipeline"
+            TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS["text-to-image"]["sana-sprint"] = "SanaSprintPipeline"
     if is_diffusers_available() and "text-to-video" not in TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS:
         TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS["text-to-video"] = {}
         TasksManager._DIFFUSERS_TASKS_TO_MODEL_MAPPINGS["text-to-video"]["ltx-video"] = "LTXPipeline"
@@ -2137,6 +2139,103 @@ class Gemma2TextEncoderOpenVINOConfig(CLIPTextOpenVINOConfig):
             "attention_mask": {0: "batch_size", 1: "sequence_length"},
         }
 
+class _BaseSam2OpenVINOConfig(OnnxConfig):
+    NORMALIZED_CONFIG_CLASS = NormalizedVisionConfig
+    DUMMY_INPUT_GENERATOR_CLASSES = (DummyVisionInputGenerator,)
+
+    def __init__(self, config: PretrainedConfig, task: str = "feature-extraction", **kwargs):
+        super().__init__(config, task=task, **kwargs)
+
+    @property
+    def inputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            "pixel_values": {0: "batch_size", 1: "num_channels", 2: "height", 3: "width"},
+        }
+
+    @property
+    def outputs(self) -> Dict[str, Dict[int, str]]:
+        return {
+            # vision encoder head
+            "image_embeddings": {0: "batch_size", 1: "embed_channels", 2: "embed_height", 3: "embed_width"},
+            "image_positional_embeddings": {
+                0: "batch_size",
+                1: "embed_channels",
+                2: "embed_height",
+                3: "embed_width",
+            },
+            # prompt encoder head
+            "iou_scores": {0: "batch_size", 1: "point_batch_size"},
+            "pred_masks": {0: "batch_size", 1: "point_batch_size", 2: "mask_height", 3: "mask_width"},
+        }
+
+    def generate_dummy_inputs(self, framework: str = "pt", **kwargs) -> Dict[str, Any]:
+        if framework == "pt":
+            import torch
+
+            zeros = torch.zeros
+            ones = torch.ones
+            float_dtype = torch.float32
+            int_dtype = torch.int64
+        else:
+            import numpy as np
+
+            zeros = lambda shape, dtype: np.zeros(shape, dtype=dtype)  # noqa: E731
+            ones = lambda shape, dtype: np.ones(shape, dtype=dtype)    # noqa: E731
+            float_dtype = np.float32
+            int_dtype = np.int64
+
+        batch_size = kwargs.pop("batch_size", DEFAULT_DUMMY_SHAPES["batch_size"])
+        point_batch = kwargs.pop("point_batch_size", 1)
+        num_points = kwargs.pop("num_points_per_image", 1)
+
+        # base vision tensor straight from parent implementation
+        vision_inputs = super().generate_dummy_inputs(framework=framework, batch_size=batch_size, **kwargs)
+
+        prompt_cfg = getattr(self._config, "prompt_encoder_config", None) or {}
+        embed_size = getattr(prompt_cfg, "image_embedding_size", (self._normalized_config.image_size // 4,) * 2)
+        if isinstance(embed_size, int):
+            embed_size = (embed_size, embed_size)
+        embed_dim = getattr(prompt_cfg, "prompt_embed_dim", 256)
+        num_masks = getattr(prompt_cfg, "num_multimask_outputs", 1)
+        mask_size = getattr(prompt_cfg, "mask_input_size", embed_size)
+        if isinstance(mask_size, int):
+            mask_size = (mask_size, mask_size)
+
+        embedding_shape = (batch_size, embed_dim, *embed_size)
+        mask_shape = (batch_size, point_batch, num_masks, *mask_size)
+
+        vision_inputs["image_embeddings"] = zeros(embedding_shape, dtype=float_dtype)
+        vision_inputs["image_positional_embeddings"] = zeros(embedding_shape, dtype=float_dtype)
+        vision_inputs["input_points"] = zeros((batch_size, point_batch, num_points, 2), dtype=float_dtype)
+        vision_inputs["input_labels"] = ones((batch_size, point_batch, num_points), dtype=int_dtype)
+
+        # keep mask/dummy outputs aligned with the config contract
+        vision_inputs.setdefault("iou_scores", zeros((batch_size, point_batch), dtype=float_dtype))
+        vision_inputs.setdefault("pred_masks", zeros(mask_shape, dtype=float_dtype))
+
+        return vision_inputs
+
+
+@register_in_tasks_manager(
+    "sam2",
+    *["feature-extraction", "image-segmentation"],
+    library_name="transformers",
+)
+class Sam2OpenVINOConfig(_BaseSam2OpenVINOConfig):
+    pass
+
+
+@register_in_tasks_manager(
+    "sam2_video",
+    *["feature-extraction", "image-segmentation"],
+    library_name="transformers",
+)
+class Sam2VideoOpenVINOConfig(_BaseSam2OpenVINOConfig):
+    _MODEL_PATCHER = Sam2VideoModelPatcher
+
+    def generate_dummy_inputs(self, framework: str = "pt", **kwargs) -> Dict[str, Any]:
+        dummy = super().generate_dummy_inputs(framework=framework, **kwargs)
+        return {"pixel_values": dummy["pixel_values"]}
 
 class DummySanaSeq2SeqDecoderTextWithEncMaskInputGenerator(DummySeq2SeqDecoderTextInputGenerator):
     SUPPORTED_INPUT_NAMES = (

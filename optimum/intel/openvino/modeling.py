@@ -53,7 +53,7 @@ from transformers.models.clip.modeling_clip import CLIPOutput
 
 from ..utils.import_utils import is_timm_available, is_timm_version
 from .modeling_base import OVBaseModel
-from .modeling_sam import OVSamModel
+from .modeling_sam import OVSam2Model, OVSam2VideoModel, OVSamModel
 from .utils import _is_timm_ov_dir
 
 
@@ -409,6 +409,10 @@ class OVModelForFeatureExtraction(OVModel):
     def _from_pretrained(cls, model_id: Union[str, Path], config: PretrainedConfig, *args, **kwargs):
         if config.model_type == "sam":
             return OVSamModel._from_pretrained(model_id, config, *args, **kwargs)
+        elif config.model_type == "sam2":
+            return OVSam2Model._from_pretrained(model_id, config, *args, **kwargs)
+        elif config.model_type == "sam_video":
+            return OVSam2VideoModel._from_pretrained(model_id, config, *args, **kwargs)
         else:
             return super()._from_pretrained(model_id, config, *args, **kwargs)
 

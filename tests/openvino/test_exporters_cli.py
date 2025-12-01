@@ -101,6 +101,8 @@ class OVCLIExportTestCase(unittest.TestCase):
         ("text-to-image", "sana"),
         ("text-to-video", "ltx-video"),
         ("feature-extraction", "sam"),
+        ("feature-extraction", "sam2"),
+        ("feature-extraction", "sam-video"),
         ("text-to-audio", "speecht5"),
         ("zero-shot-image-classification", "clip"),
     ]
@@ -147,6 +149,8 @@ class OVCLIExportTestCase(unittest.TestCase):
         "sana": 2 if is_tokenizers_version("<", "0.20.0") or is_openvino_version(">=", "2024.5") else 0,
         "ltx-video": 2 if is_tokenizers_version("<", "0.20.0") or is_openvino_version(">=", "2024.5") else 0,
         "sam": 0,  # no tokenizer
+        "sam2": 0,  # no tokenizer
+        "sam-video": 0,  # no tokenizer
         "speecht5": 2,
         "clip": 2 if is_tokenizers_version("<", "0.20.0") or is_openvino_version(">=", "2024.5") else 0,
         "mamba": 2,

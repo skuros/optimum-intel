@@ -12,6 +12,8 @@ from openvino._offline_transformations import apply_moc_transformations, compres
 from transformers import AutoConfig, PretrainedConfig, SamModel
 from transformers.modeling_outputs import ModelOutput
 from transformers.models.sam.modeling_sam import SamImageSegmentationOutput, SamPositionalEmbedding
+from transformers.models.sam2.modeling_sam2 import Sam2ImageSegmentationOutput, Sam2PositionalEmbedding
+from transformers.models.sam2_video.modeling_sam2_video import Sam2VideoImageSegmentationOutput, Sam2VideoPositionalEmbedding
 
 from ...exporters.openvino.utils import save_config
 from .configuration import OVConfig, OVQuantizationConfigBase
@@ -430,3 +432,39 @@ class OVSamModel(OVBaseModel):
             if model_has_dynamic_inputs(ov_model):
                 return True
         return False
+
+class OVSam2Model(OVSamModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.shared_image_embedding = Sam2PositionalEmbedding(self.config.prompt_encoder_config)
+        self.positional_embeddings = self.get_image_wide_positional_embeddings()
+
+    def get_image_wide_positional_embeddings(self):
+        size = self.shared_image_embedding.image_embedding_size
+        device = self.shared_image_embedding.positional_embedding.device
+        dtype = self.shared_image_embedding.positional_embedding.dtype
+        grid = torch.ones(size, device=device, dtype=dtype)
+        y_embed = grid.cumsum(dim=0) - 0.5
+        x_embed = grid.cumsum(dim=1) - 0.5
+        y_embed = y_embed / size[0]
+        x_embed = x_embed / size[1]
+        pos = self.shared_image_embedding(torch.stack([x_embed, y_embed], dim=-1))
+        return pos.permute(2, 0, 1).unsqueeze(0)
+    
+class OVSam2VideoModel(OVSamModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.shared_image_embedding = Sam2VideoPositionalEmbedding(self.config.prompt_encoder_config)
+        self.positional_embeddings = self.get_image_wide_positional_embeddings()
+
+    def get_image_wide_positional_embeddings(self):
+        size = self.shared_image_embedding.image_embedding_size
+        device = self.shared_image_embedding.positional_embedding.device
+        dtype = self.shared_image_embedding.positional_embedding.dtype
+        grid = torch.ones(size, device=device, dtype=dtype)
+        y_embed = grid.cumsum(dim=0) - 0.5
+        x_embed = grid.cumsum(dim=1) - 0.5
+        y_embed = y_embed / size[0]
+        x_embed = x_embed / size[1]
+        pos = self.shared_image_embedding(torch.stack([x_embed, y_embed], dim=-1))
+        return pos.permute(2, 0, 1).unsqueeze(0)

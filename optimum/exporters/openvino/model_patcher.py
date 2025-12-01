@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache
-from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, BaseModelOutputWithPooling
+from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, BaseModelOutputWithPooling, ModelOutput
 from transformers.models.phi3.modeling_phi3 import apply_rotary_pos_emb, repeat_kv
 from transformers.models.speecht5.modeling_speecht5 import SpeechT5EncoderWithSpeechPrenet
 
@@ -291,6 +291,94 @@ class MixtralModelPatcher(OVDecoderModelPatcher):
 
         for layer in self._model.model.layers:
             layer.block_sparse_moe.forward = layer.block_sparse_moe._unpatched_forward
+
+
+def _sam2_video_export_forward(
+    self,
+    pixel_values: torch.Tensor = None,
+    input_points: Optional[torch.Tensor] = None,
+    input_labels: Optional[torch.Tensor] = None,
+    input_boxes: Optional[torch.Tensor] = None,
+    input_masks: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> ModelOutput:
+    if pixel_values is None:
+        raise ValueError("`pixel_values` must be provided for Sam2Video export.")
+
+    batch_size = pixel_values.shape[0]
+
+    image_positional_embeddings = self.get_image_wide_positional_embeddings().to(
+        device=pixel_values.device,
+        dtype=pixel_values.dtype,
+    )
+    image_positional_embeddings = image_positional_embeddings.repeat(batch_size, 1, 1, 1)
+
+    feature_maps, _, _, _ = self.get_image_features(pixel_values)
+    feature_maps = list(feature_maps)
+    feature_maps[-1] = feature_maps[-1] + self.no_memory_embedding.to(
+        device=feature_maps[-1].device, dtype=feature_maps[-1].dtype
+    )
+
+    image_embeddings = [
+        feature_map.permute(1, 2, 0).contiguous().view(batch_size, -1, *feat_size)
+        for feature_map, feat_size in zip(feature_maps, self.backbone_feature_sizes)
+    ]
+
+    if input_points is not None and input_labels is None:
+        input_labels = torch.ones_like(input_points[..., 0], dtype=torch.int, device=input_points.device)
+
+    if input_points is None and input_boxes is None:
+        dtype = image_embeddings[-1].dtype
+        device = image_embeddings[-1].device
+        input_points = torch.zeros(batch_size, 1, 1, 2, dtype=dtype, device=device)
+        input_labels = -torch.ones(batch_size, 1, 1, dtype=torch.int32, device=device)
+
+    if input_masks is not None and input_masks.shape[-2:] != self.prompt_encoder.mask_input_size:
+        input_masks = F.interpolate(
+            input_masks.float(),
+            size=self.prompt_encoder.mask_input_size,
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        ).to(input_masks.dtype)
+
+    sparse_embeddings, dense_embeddings = self.prompt_encoder(
+        input_points=input_points,
+        input_labels=input_labels,
+        input_boxes=input_boxes,
+        input_masks=input_masks,
+    )
+
+    low_res_multimasks, iou_scores, _, _ = self.mask_decoder(
+        image_embeddings=image_embeddings[-1],
+        image_positional_embeddings=image_positional_embeddings,
+        sparse_prompt_embeddings=sparse_embeddings,
+        dense_prompt_embeddings=dense_embeddings,
+        multimask_output=False,
+        high_resolution_features=image_embeddings[:-1],
+    )
+
+    pred_masks = low_res_multimasks.squeeze(2)
+    iou_scores = iou_scores.squeeze(-1)
+
+    return ModelOutput(
+        image_embeddings=image_embeddings[-1],
+        image_positional_embeddings=image_positional_embeddings,
+        iou_scores=iou_scores,
+        pred_masks=pred_masks,
+    )
+
+
+class Sam2VideoModelPatcher(ModelPatcher):
+    def __enter__(self):
+        super().__enter__()
+        self._orig_forward = self._model.forward
+        self._model.forward = types.MethodType(_sam2_video_export_forward, self._model)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._model.forward = self._orig_forward
+        return super().__exit__(exc_type, exc_value, traceback)
 
 
 class ArcticModelPatcher(MixtralModelPatcher):
@@ -1018,6 +1106,7 @@ class BaichuanModelPatcher(OVDecoderModelPatcher):
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
                     return_dict=self.config.return_dict,
+                    position_ids=position_ids,
                 )
 
             self._model.forward = types.MethodType(forward, self._model)

@@ -13,6 +13,7 @@
 #  limitations under the License.
 
 
+import enum
 import json
 import logging
 import os
@@ -31,8 +32,52 @@ from huggingface_hub import model_info
 from openvino import Core, Model, properties
 from openvino import Type as OVType
 from packaging.version import Version
+import transformers
 from transformers import AutoTokenizer, CLIPTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from transformers.onnx.utils import ParameterFormat, compute_serialized_parameters_size
+try:
+    from transformers.onnx.utils import ParameterFormat, compute_serialized_parameters_size
+except ImportError:  # transformers >= 4.45
+    try:
+        from transformers.utils.onnx import ParameterFormat, compute_serialized_parameters_size  # type: ignore[import]
+    except ImportError:  # transformers >= 4.57 (new exporters module)
+        try:
+            from transformers.exporters.onnx.utils import ParameterFormat, compute_serialized_parameters_size  # type: ignore[import]
+        except ImportError:
+            class ParameterFormat(enum.Enum):
+                Float = "float32"
+
+            def compute_serialized_parameters_size(num_parameters: int, parameter_format: "ParameterFormat") -> int:
+                bytes_per_parameter = 4 if parameter_format == ParameterFormat.Float else 1
+                return num_parameters * bytes_per_parameter
+
+# Temporary compatibility shim for diffusers expecting MT5Tokenizer in transformers
+try:
+    from transformers import MT5Tokenizer  # type: ignore[attr-defined]
+except ImportError:  # transformers >= version removing MT5Tokenizer
+    from transformers import T5Tokenizer
+
+    class MT5Tokenizer(T5Tokenizer):  # type: ignore[misc]
+        pass
+
+    setattr(transformers, "MT5Tokenizer", MT5Tokenizer)
+
+# Temporary diffusers shim
+try:
+    from diffusers.utils import import_utils
+except Exception:
+    import_utils = None
+
+if import_utils is not None:
+    class_mapping = getattr(import_utils, "_class_to_module", None)
+    if isinstance(class_mapping, dict):
+        for cls in ("HunyuanDiTPipeline", "StableDiffusionHunyuanDiTPipeline"):
+            class_mapping.pop(cls, None)
+    else:
+        for cls in ("HunyuanDiTPipeline", "StableDiffusionHunyuanDiTPipeline"):
+            try:
+                delattr(import_utils, cls)
+            except AttributeError:
+                pass
 
 from optimum.intel.utils.import_utils import is_torch_version
 
@@ -136,6 +181,8 @@ _HEAD_TO_AUTOMODELS = {
     "stable-diffusion-xl": "OVStableDiffusionXLPipeline",
     "stable-diffusion-3": "OVStableDiffusion3Pipeline",
     "sam": "OVSamModel",
+    "sam2": "OVSam2Model",
+    "sam-video": "OVSam2VideoModel",
     "sana": "OVSanaPipeline",
     "flux": "OVFluxPipeline",
     "flux-fill": "OVFluxFillPipeline",
