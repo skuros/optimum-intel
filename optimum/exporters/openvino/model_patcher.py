@@ -42,6 +42,12 @@ if is_transformers_version(">=", "4.53"):
     from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
 
+try:
+    from transformers.models.sam2_video.modeling_sam2_video import Sam2VideoImageSegmentationOutput
+except Exception:  # pragma: no cover - optional dependency
+    Sam2VideoImageSegmentationOutput = None
+
+
 if TYPE_CHECKING:
     from transformers.cache_utils import Cache
     from transformers.modeling_utils import PreTrainedModel
@@ -3267,6 +3273,128 @@ class LlavaNextVideoImageEmbeddingModelPatcher(ModelPatcher):
     ):
         model.__orig_forward = model.forward
         model.forward = types.MethodType(llava_next_video_vision_embed_forward, model)
+
+        super().__init__(config, model, model_kwargs)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        self._model.forward = self._model.__orig_forward
+
+
+def sam2_video_vision_encoder_forward(self, pixel_values: torch.Tensor, **kwargs):
+    """Forward pass that exposes FPN features formatted for export."""
+
+    feature_maps, feature_maps_position_embeddings, vision_hidden_states, vision_attentions = self.get_image_features(
+        pixel_values, **kwargs
+    )
+
+    # ONNX expects tuple outputs, so convert lists to tuples with consistent ordering.
+    feature_maps_tuple: Tuple[torch.Tensor, ...] = tuple(feature_maps)
+    position_embeddings_tuple: Tuple[torch.Tensor, ...] = tuple(feature_maps_position_embeddings)
+    vision_hidden_states_tuple: Optional[Tuple[torch.Tensor, ...]] = (
+        tuple(vision_hidden_states) if vision_hidden_states is not None else None
+    )
+    vision_attentions_tuple: Optional[Tuple[torch.Tensor, ...]] = (
+        tuple(vision_attentions) if vision_attentions is not None else None
+    )
+
+    return BaseModelOutput(
+        last_hidden_state=feature_maps_tuple[-1],
+        hidden_states=feature_maps_tuple,
+        attentions=position_embeddings_tuple,
+        vision_hidden_states=vision_hidden_states_tuple,
+        vision_attentions=vision_attentions_tuple,
+    )
+
+
+def sam2_video_prompt_encoder_forward(
+    self,
+    input_points: Optional[torch.Tensor] = None,
+    input_labels: Optional[torch.Tensor] = None,
+    input_boxes: Optional[torch.Tensor] = None,
+    input_masks: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Expose prompt encoder outputs in a deterministic tuple."""
+
+    sparse_embeddings, dense_embeddings = self.get_prompt_embeddings(
+        input_points=input_points,
+        input_labels=input_labels,
+        input_boxes=input_boxes,
+        input_masks=input_masks,
+    )
+    return sparse_embeddings, dense_embeddings
+
+
+def sam2_video_mask_decoder_forward(
+    self,
+    image_embeddings: torch.Tensor,
+    image_positional_embeddings: torch.Tensor,
+    sparse_prompt_embeddings: torch.Tensor,
+    dense_prompt_embeddings: torch.Tensor,
+    multimask_output: bool = True,
+    high_resolution_features: Optional[List[torch.Tensor]] = None,
+    attention_similarity: Optional[torch.Tensor] = None,
+    target_embedding: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Forward that routes inputs directly to the mask decoder component."""
+
+    masks, iou_scores, sam_tokens, object_score_logits = self.mask_decoder(
+        image_embeddings=image_embeddings,
+        image_positional_embeddings=image_positional_embeddings,
+        sparse_prompt_embeddings=sparse_prompt_embeddings,
+        dense_prompt_embeddings=dense_prompt_embeddings,
+        multimask_output=multimask_output,
+        high_resolution_features=high_resolution_features,
+        attention_similarity=attention_similarity,
+        target_embedding=target_embedding,
+    )
+
+    return masks, iou_scores, sam_tokens, object_score_logits
+
+
+class Sam2VideoVisionEncoderPatcher(ModelPatcher):
+    def __init__(
+        self,
+        config: "OnnxConfig",
+        model: "PreTrainedModel",
+        model_kwargs: Dict[str, Any],
+    ):
+        model.__orig_forward = model.forward
+        model.forward = types.MethodType(sam2_video_vision_encoder_forward, model)
+
+        super().__init__(config, model, model_kwargs)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        self._model.forward = self._model.__orig_forward
+
+
+class Sam2VideoPromptEncoderPatcher(ModelPatcher):
+    def __init__(
+        self,
+        config: "OnnxConfig",
+        model: "PreTrainedModel",
+        model_kwargs: Dict[str, Any],
+    ):
+        model.__orig_forward = model.forward
+        model.forward = types.MethodType(sam2_video_prompt_encoder_forward, model)
+
+        super().__init__(config, model, model_kwargs)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        self._model.forward = self._model.__orig_forward
+
+
+class Sam2VideoMaskDecoderPatcher(ModelPatcher):
+    def __init__(
+        self,
+        config: "OnnxConfig",
+        model: "PreTrainedModel",
+        model_kwargs: Dict[str, Any],
+    ):
+        model.__orig_forward = model.forward
+        model.forward = types.MethodType(sam2_video_mask_decoder_forward, model)
 
         super().__init__(config, model, model_kwargs)
 
