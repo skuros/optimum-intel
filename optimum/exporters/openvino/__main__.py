@@ -279,7 +279,14 @@ def main_export(
         do_gptq_patching = quant_method == "gptq"
         do_bitnet_patching = quant_method == "bitnet"
 
-        model_type = config.model_type
+        export_model_type = getattr(config, "export_model_type", None)
+        export_model_map = getattr(config, "export_model_type_map", None)
+        if isinstance(export_model_map, dict) and task in export_model_map:
+            export_model_type = export_model_map[task]
+        if export_model_type is not None:
+            model_type = export_model_type
+        else:
+            model_type = getattr(config, "model_type", None) or ""
         if model_type not in TasksManager._SUPPORTED_MODEL_TYPE:
             custom_architecture = True
             if custom_export_configs is None:
@@ -451,8 +458,13 @@ def main_export(
                     )
                 model.config.pad_token_id = pad_token_id
 
-        if hasattr(model.config, "export_model_type"):
-            model_type = model.config.export_model_type
+        export_model_type = getattr(model.config, "export_model_type", None)
+        export_model_map = getattr(model.config, "export_model_type_map", None)
+        if isinstance(export_model_map, dict) and task in export_model_map:
+            export_model_type = export_model_map[task]
+
+        if export_model_type is not None:
+            model_type = export_model_type
         else:
             model_type = model.config.model_type
 

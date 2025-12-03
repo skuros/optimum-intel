@@ -298,7 +298,7 @@ def save_preprocessors(
     preprocessors: List, config: PretrainedConfig, output: Union[str, Path], trust_remote_code: bool
 ):
     model_name_or_path = config._name_or_path
-    if hasattr(config, "export_model_type"):
+    if hasattr(config, "export_model_type") and config.export_model_type is not None:
         model_type = config.export_model_type
     else:
         model_type = config.model_type

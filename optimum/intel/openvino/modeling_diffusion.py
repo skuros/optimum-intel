@@ -26,21 +26,36 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import openvino
 import torch
-from diffusers import (
-    AutoPipelineForImage2Image,
-    AutoPipelineForInpainting,
-    AutoPipelineForText2Image,
-    DiffusionPipeline,
-    LatentConsistencyModelImg2ImgPipeline,
-    LatentConsistencyModelPipeline,
-    StableDiffusionImg2ImgPipeline,
-    StableDiffusionInpaintPipeline,
-    StableDiffusionPipeline,
-    StableDiffusionXLImg2ImgPipeline,
-    StableDiffusionXLInpaintPipeline,
-    StableDiffusionXLPipeline,
-    pipelines,
-)
+
+from types import SimpleNamespace
+
+
+_DIFFUSERS_IMPORT_ERROR: Optional[BaseException] = None
+
+try:
+    from diffusers import (
+        AutoPipelineForImage2Image,
+        AutoPipelineForInpainting,
+        AutoPipelineForText2Image,
+        DiffusionPipeline,
+        LatentConsistencyModelImg2ImgPipeline,
+        LatentConsistencyModelPipeline,
+        StableDiffusionImg2ImgPipeline,
+        StableDiffusionInpaintPipeline,
+        StableDiffusionPipeline,
+        StableDiffusionXLImg2ImgPipeline,
+        StableDiffusionXLInpaintPipeline,
+        StableDiffusionXLPipeline,
+        pipelines,
+    )
+except (ImportError, RuntimeError) as _error:
+    _DIFFUSERS_IMPORT_ERROR = _error
+    AutoPipelineForImage2Image = AutoPipelineForInpainting = AutoPipelineForText2Image = object  # type: ignore
+    DiffusionPipeline = object  # type: ignore
+    LatentConsistencyModelImg2ImgPipeline = LatentConsistencyModelPipeline = object  # type: ignore
+    StableDiffusionImg2ImgPipeline = StableDiffusionInpaintPipeline = StableDiffusionPipeline = object  # type: ignore
+    StableDiffusionXLImg2ImgPipeline = StableDiffusionXLInpaintPipeline = StableDiffusionXLPipeline = object  # type: ignore
+    pipelines = SimpleNamespace()  # type: ignore
 from diffusers.configuration_utils import ConfigMixin
 from diffusers.schedulers import SchedulerMixin
 from diffusers.schedulers.scheduling_utils import SCHEDULER_CONFIG_NAME
@@ -50,7 +65,50 @@ from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
 from huggingface_hub.utils import validate_hf_hub_args
 from openvino import Core
 from openvino._offline_transformations import compress_model_transformation
-from transformers import CLIPFeatureExtractor, CLIPTokenizer
+try:
+    from transformers import CLIPFeatureExtractor
+except ImportError:
+    try:
+        from transformers import CLIPImageProcessor as _CLIPImageProcessor
+    except ImportError:  # transformers build without CLIP processors
+        CLIPFeatureExtractor = None  # type: ignore
+    else:
+
+        class CLIPFeatureExtractor(_CLIPImageProcessor):  # type: ignore
+            """Backward-compatible alias for deprecated CLIPFeatureExtractor."""
+
+            pass
+
+_CLIP_IMPORT_ERROR: Optional[BaseException] = None
+
+try:
+    from transformers import CLIPFeatureExtractor
+except ImportError as _clip_exc:
+    try:
+        from transformers import CLIPImageProcessor as _CLIPImageProcessor
+    except ImportError:
+        _CLIP_IMPORT_ERROR = _clip_exc
+
+        class CLIPFeatureExtractor:  # type: ignore
+            """Placeholder that raises the original import error when used."""
+
+            def __init__(self, *args, **kwargs):  # pylint: disable=unused-argument
+                raise _CLIP_IMPORT_ERROR
+
+            @classmethod
+            def from_pretrained(cls, *args, **kwargs):  # pylint: disable=unused-argument
+                raise _CLIP_IMPORT_ERROR
+
+    else:
+
+        class CLIPFeatureExtractor(_CLIPImageProcessor):  # type: ignore
+            """Backward-compatible alias for deprecated CLIPFeatureExtractor."""
+
+            pass
+else:
+    _CLIP_IMPORT_ERROR = None
+
+from transformers import CLIPTokenizer
 from transformers.modeling_outputs import ModelOutput
 from transformers.utils import http_user_agent
 
@@ -131,6 +189,19 @@ DIFFUSION_MODEL_TEXT_ENCODER_3_SUBFOLDER = "text_encoder_3"
 
 core = Core()
 
+
+def _ensure_diffusers_available(operation: str = "use OpenVINO diffusion pipelines") -> None:
+    if _DIFFUSERS_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            f"Diffusers dependencies are required to {operation}, but importing diffusers failed. "
+            "Install a diffusers build compatible with your transformers version or disable diffusion features."
+        ) from _DIFFUSERS_IMPORT_ERROR
+    if _CLIP_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            f"Transformers CLIP utilities are required to {operation}, but importing them failed. "
+            "Install a transformers build exposing CLIPFeatureExtractor/CLIPImageProcessor or disable diffusion features."
+        ) from _CLIP_IMPORT_ERROR
+
 logger = logging.getLogger(__name__)
 
 
@@ -172,6 +243,7 @@ class OVDiffusionPipeline(OVBaseModel, DiffusionPipeline):
         quantization_config: Optional[Union[OVWeightQuantizationConfig, Dict]] = None,
         **kwargs,
     ):
+        _ensure_diffusers_available(f"initialize {self.__class__.__name__}")
         self._device = device.upper()
         self.is_dynamic = dynamic_shapes
         self._compile_only = compile_only

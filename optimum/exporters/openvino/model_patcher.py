@@ -18,6 +18,7 @@ import logging
 import logging as log
 import math
 import types
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -3284,27 +3285,37 @@ class LlavaNextVideoImageEmbeddingModelPatcher(ModelPatcher):
 def sam2_video_vision_encoder_forward(self, pixel_values: torch.Tensor, **kwargs):
     """Forward pass that exposes FPN features formatted for export."""
 
+    if pixel_values.dim() == 5:
+        pixel_values = pixel_values.flatten(0, 1)
+
     feature_maps, feature_maps_position_embeddings, vision_hidden_states, vision_attentions = self.get_image_features(
         pixel_values, **kwargs
     )
 
-    # ONNX expects tuple outputs, so convert lists to tuples with consistent ordering.
-    feature_maps_tuple: Tuple[torch.Tensor, ...] = tuple(feature_maps)
-    position_embeddings_tuple: Tuple[torch.Tensor, ...] = tuple(feature_maps_position_embeddings)
-    vision_hidden_states_tuple: Optional[Tuple[torch.Tensor, ...]] = (
-        tuple(vision_hidden_states) if vision_hidden_states is not None else None
-    )
-    vision_attentions_tuple: Optional[Tuple[torch.Tensor, ...]] = (
-        tuple(vision_attentions) if vision_attentions is not None else None
-    )
+    def _coerce_sequence(items: Optional[Union[List[torch.Tensor], Tuple[torch.Tensor, ...], torch.Tensor]]) -> Optional[Union[Tuple[torch.Tensor, ...], torch.Tensor]]:
+        if items is None:
+            return None
+        if isinstance(items, torch.Tensor):
+            return items
+        return tuple(items)
 
-    return BaseModelOutput(
-        last_hidden_state=feature_maps_tuple[-1],
-        hidden_states=feature_maps_tuple,
-        attentions=position_embeddings_tuple,
-        vision_hidden_states=vision_hidden_states_tuple,
-        vision_attentions=vision_attentions_tuple,
-    )
+    feature_maps_tuple = _coerce_sequence(feature_maps)
+    position_embeddings_tuple = _coerce_sequence(feature_maps_position_embeddings)
+    vision_hidden_states_tuple = _coerce_sequence(vision_hidden_states)
+    vision_attentions_tuple = _coerce_sequence(vision_attentions)
+
+    if isinstance(feature_maps_tuple, tuple):
+        last_hidden_state = feature_maps_tuple[-1]
+    else:
+        last_hidden_state = feature_maps_tuple
+
+    outputs = OrderedDict()
+    outputs["last_hidden_state"] = last_hidden_state
+    outputs["hidden_states"] = feature_maps_tuple
+    outputs["attentions"] = position_embeddings_tuple
+    outputs["vision_hidden_states"] = vision_hidden_states_tuple
+    outputs["vision_attentions"] = vision_attentions_tuple
+    return outputs
 
 
 def sam2_video_prompt_encoder_forward(
