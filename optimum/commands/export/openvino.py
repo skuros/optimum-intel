@@ -142,6 +142,20 @@ def parse_args_openvino(parser: "ArgumentParser"):
         help=("The group size to use for quantization. Recommended value is 128 and -1 uses per-column quantization."),
     )
     optional_group.add_argument(
+        "--group-size-fallback",
+        type=str,
+        choices=["error", "ignore", "adjust"],
+        default=None,
+        help=(
+            "Specifies how to handle operations that do not support the given group size. Possible values are: "
+            "`error`: raise an error if the given group size is not supported by a node, this is the default behavior; "
+            "`ignore`: skip nodes that cannot be compressed with the given group size; "
+            "`adjust`: adjust the group size to the maximum supported value for each problematic node, if there is no "
+            "valid value greater than or equal to 32, then the node is quantized to the backup precision which is "
+            "int8_asym by default. "
+        ),
+    )
+    optional_group.add_argument(
         "--backup-precision",
         type=str,
         choices=["none", "int8_sym", "int8_asym"],
@@ -160,14 +174,14 @@ def parse_args_openvino(parser: "ArgumentParser"):
         default=None,
         help=(
             "The dataset used for data-aware compression or quantization with NNCF. "
-            "For language models you can use the one from the list ['auto','wikitext2','c4','c4-new']. With 'auto' the "
+            "For language models you can use the one from the list ['auto','wikitext2','c4','c4-new','gsm8k']. With 'auto' the "
             "dataset will be collected from model's generations. "
             "For diffusion models it should be on of ['conceptual_captions',"
             "'laion/220k-GPT4Vision-captions-from-LIVIS','laion/filtered-wit']. "
             "For visual language models the dataset must be set to 'contextual'. "
             "Note: if none of the data-aware compression algorithms are selected and ratio parameter is omitted or "
             "equals 1.0, the dataset argument will not have an effect on the resulting model."
-            "Note: for text generation task, datasets with English texts such as 'wikitext2','c4' or 'c4-new' usually "
+            "Note: for text generation task, datasets with English texts such as 'wikitext2','gsm8k','c4' or 'c4-new' usually "
             "work fine even for non-English models."
         ),
     )
@@ -595,6 +609,7 @@ def prepare_wc_config(args, default_configs):
         "dtype": args.weight_format,
         "backup_precision": args.backup_precision,
         "statistics_path": args.quantization_statistics_path,
+        "group_size_fallback": args.group_size_fallback,
     }
 
 
