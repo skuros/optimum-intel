@@ -31,7 +31,6 @@ from transformers import (
 from transformers.file_utils import add_start_docstrings
 from transformers.modeling_outputs import ModelOutput
 from transformers.models.clip.modeling_clip import CLIPOutput
-from transformers.utils import is_offline_mode
 
 from optimum.exporters.tasks import TasksManager
 
@@ -39,7 +38,7 @@ from ...exporters.openvino import main_export
 from ..utils.modeling_utils import _find_files_matching_pattern, _OpenClipForZeroShotImageClassification
 from .configuration import OVConfig, OVWeightQuantizationConfig
 from .modeling import MODEL_START_DOCSTRING, OVModel
-from .modeling_base import OVModelHostMixin
+from .modeling_base import OVModelHostMixin, is_offline_mode
 from .utils import TemporaryDirectory
 
 

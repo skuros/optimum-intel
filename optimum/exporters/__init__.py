@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import pkgutil
 import transformers
+
+__path__ = pkgutil.extend_path(__path__, __name__)
 
 try:  # new Transformers no longer expose MT5Tokenizer
     from transformers import MT5Tokenizer  # type: ignore[attr-defined]
